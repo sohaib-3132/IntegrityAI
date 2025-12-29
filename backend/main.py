@@ -11,14 +11,28 @@ import re
 
 # --- 1. SETUP & DOWNLOADS ---
 print("⏳ CHECKING DICTIONARY DATA...")
-resources = ['wordnet', 'omw-1.4', 'averaged_perceptron_tagger', 'punkt', 'punkt_tab']
+resources = [
+    'wordnet', 
+    'omw-1.4', 
+    'averaged_perceptron_tagger', 
+    'averaged_perceptron_tagger_eng', 
+    'punkt', 
+    'punkt_tab'
+]
+
 for res in resources:
     try:
-        nltk.data.find(f'corpora/{res}' if 'wordnet' in res else f'tokenizers/{res}')
+        if 'wordnet' in res or 'omw' in res:
+            nltk.data.find(f'corpora/{res}')
+        elif 'tagger' in res:
+            nltk.data.find(f'taggers/{res}')
+        else:
+            nltk.data.find(f'tokenizers/{res}')
+            
     except LookupError:
         print(f"⬇️ Downloading {res}...")
         nltk.download(res)
-
+         
 app = FastAPI()
 
 app.add_middleware(
@@ -43,8 +57,7 @@ except Exception as e:
     classifier = None
     perplexity_model = None
 
-# --- 3. SMART GRAMMAR MAP (High Quality Replacements) ---
-# Used for words that usually don't have good dictionary synonyms
+# --- 3. SMART GRAMMAR MAP ---
 FUNCTIONAL_SYNONYMS = {
     "when": ["while", "at the time", "during which", "as soon as"],
     "as": ["since", "because", "while", "in the role of"],
@@ -63,7 +76,7 @@ FUNCTIONAL_SYNONYMS = {
     "are": ["remain", "exist as", "constitute", "represent"],
     "was": ["remained", "existed as", "constituted"],
     "very": ["extremely", "highly", "exceedingly", "truly"],
-    "good": ["excellent", "beneficial", "favorable", "positive"], # Common vague words fix
+    "good": ["excellent", "beneficial", "favorable", "positive"],
     "bad": ["negative", "detrimental", "poor", "adverse"],
     "use": ["utilize", "employ", "apply", "leverage"]
 }
@@ -84,76 +97,84 @@ class TextRequest(BaseModel):
     title: str = ""
     content: str
 
-# --- 5. SMART SYNONYM LOGIC ---
-def get_synonyms(word, tone="Standard", strict=True):
+# --- 5. LOGIC FUNCTIONS ---
+def get_synonyms(word, pos_tag=None, tone="Standard", strict=True):
     word_lower = word.lower()
     synonyms = set()
-
-    # A. Check Manual Map (Best Quality for Functional Words)
-    if word_lower in FUNCTIONAL_SYNONYMS:
+    
+    # 1. Check functional synonyms first (manual list)
+    if word_lower in FUNCTIONAL_SYNONYMS: 
         return FUNCTIONAL_SYNONYMS[word_lower]
 
-    # B. Check WordNet (With Quality Filters)
-    # 1. Get Synsets
-    synsets = wordnet.synsets(word)
-    
-    # 2. QUALITY FILTER: Only look at the top 3 most common definitions.
-    #    This avoids getting "slope" for "bank" (money) if "financial" is the primary meaning.
+    # 2. Map NLTK POS tags to WordNet POS tags
+    wn_tag = None
+    if pos_tag:
+        if pos_tag.startswith('J'): wn_tag = wordnet.ADJ
+        elif pos_tag.startswith('V'): wn_tag = wordnet.VERB
+        elif pos_tag.startswith('N'): wn_tag = wordnet.NOUN
+        elif pos_tag.startswith('R'): wn_tag = wordnet.ADV
+
+    # 3. Fetch Synsets (Filter by POS if we have a tag)
+    if wn_tag:
+        synsets = wordnet.synsets(word, pos=wn_tag)
+    else:
+        # Fallback: if no tag is provided, grab everything (old behavior)
+        synsets = wordnet.synsets(word)
+
     most_common_synsets = synsets[:3] 
 
     for syn in most_common_synsets:
         for lemma in syn.lemmas():
             candidate = lemma.name().replace("_", " ")
-            
-            # Skip exact matches
             if candidate.lower() == word_lower: continue
             
-            # Strict Tone Filtering
+            # Strict mode filters
             if strict:
                 if tone == "Fluent" or tone == "Standard":
-                    # For standard text, avoid very long/complex academic words
                     if len(candidate) > len(word) + 5: continue
                 elif tone == "Formal":
-                    # For formal text, avoid very short/slang words
                     if len(candidate) < 4: continue 
             
             synonyms.add(candidate)
-    
-    # Sort by length to give variety
+            
     return sorted(list(synonyms), key=len)
 
 def rewrite_sentence_logic(sentence, tone, variance_level=0.5):
+    # 1. Tokenize words
     words = word_tokenize(sentence)
+    
+    # 2. Get Part of Speech tags for the whole sentence
+    # Output example: [('I', 'PRP'), ('book', 'VBP'), ('a', 'DT'), ('flight', 'NN')]
+    tagged_words = nltk.pos_tag(words)
+
     new_words = []
     
-    for word in words:
+    # 3. Loop through words WITH their tags
+    for word, tag in tagged_words:
         clean_word = re.sub(r'[^\w\s]', '', word)
         word_lower = clean_word.lower()
-
-        # Check if we should swap this word
         is_functional = word_lower in FUNCTIONAL_SYNONYMS
         
-        # Don't swap short words unless they are in our special grammar map
+        # Skip short words unless they are functional
         if len(clean_word) < 3 and not is_functional:
             new_words.append(word)
             continue
-        
-        # Swap Probability
-        swap_prob = 0.4
-        if tone == "Fluent": swap_prob = 0.5
+            
+        swap_prob = 0.4 if tone != "Fluent" else 0.5
         
         if random.random() < (swap_prob * variance_level):
-            syns = get_synonyms(clean_word, tone, strict=True)
+            # PASS THE TAG HERE
+            syns = get_synonyms(clean_word, pos_tag=tag, tone=tone, strict=True)
+            
             if syns:
                 replacement = random.choice(syns)
-                # Maintain Capitalization
                 if word[0].isupper(): replacement = replacement.capitalize()
                 new_words.append(replacement)
             else:
                 new_words.append(word)
         else:
             new_words.append(word)
-    
+            
     reconstructed = " ".join(new_words)
     return re.sub(r'\s+([?.!,:;])', r'\1', reconstructed)
 
@@ -162,28 +183,26 @@ def rewrite_sentence_logic(sentence, tone, variance_level=0.5):
 @app.post("/paraphrase")
 async def paraphrase_text(data: ParaphraseRequest):
     sentences = sent_tokenize(data.content)
-    rewritten_sentences = []
-    for sent in sentences:
-        rewritten_sentences.append(rewrite_sentence_logic(sent, data.tone, variance_level=1.5))
+    rewritten_sentences = [rewrite_sentence_logic(sent, data.tone, variance_level=1.5) for sent in sentences]
     return {"paraphrased": " ".join(rewritten_sentences)}
 
 @app.post("/rewrite_sentence")
 async def fetch_sentence_variants(data: SentenceRequest):
     variants = []
-    # Try 5 times to get 3 unique meaningful variations
     for _ in range(5):
-        var = rewrite_sentence_logic(data.sentence, data.tone, variance_level=2.5)
+        var = rewrite_sentence_logic(data.sentence, data.tone, variance_level=1.8)
         if var not in variants and var != data.sentence:
             variants.append(var)
             
-    if not variants: variants = ["No suitable variations found."]
+    # Fallback if no good variations were found
+    if not variants:
+        variants = ["Could not generate a distinct variation."]
+        
     return {"variants": variants[:3]}
 
 @app.post("/synonyms")
 async def fetch_synonyms(data: WordRequest):
-    # strict=False allows seeing more options when user manually clicks
     syns = get_synonyms(data.word, "Standard", strict=False)
-    # Return top 6 most relevant
     return {"synonyms": syns[:6]}
 
 @app.post("/analyze")
@@ -191,28 +210,47 @@ async def analyze_text(data: TextRequest):
     if classifier is None: return {"prediction": "Error", "confidence": 0, "risk_level": "None"}
     
     try:
-        # 1. RoBERTa Scan
+        # A. GLOBAL SCORE
         result = classifier(data.content)[0]
         score = result['score']
         label = result['label']
-        
-        # Label Mapping
         ai_prob = score * 100 if label in ['Fake', 'LABEL_0'] else (1 - score) * 100
         
-        # 2. Perplexity Scan
+        # Perplexity
         enc = perplexity_tokenizer(data.content, return_tensors="pt")
         inp = enc.input_ids.to(torch_device)
         with torch.no_grad():
             ppl = torch.exp(perplexity_model(inp, labels=inp).loss).item()
 
-        # 3. Hybrid Decision Logic
         pred, risk, conf = "Human-Written", "Low", 100 - ai_prob
-        
         if ai_prob > 80: pred, risk, conf = "AI-Generated", "High", ai_prob
         elif ppl < 25: pred, risk, conf = "Suspected AI (Modern)", "High", 88.5
         elif ppl < 45: pred, risk, conf = "Possible AI Edit", "Medium", 65.0
         
-        return {"prediction": pred, "confidence": round(conf, 1), "risk_level": risk}
+        # B. SENTENCE-LEVEL "X-RAY" BREAKDOWN
+        sentences = sent_tokenize(data.content)
+        breakdown = []
+        
+        for sent in sentences:
+            if len(sent) < 5: 
+                breakdown.append({"text": sent, "risk": "Low", "prob": 0})
+                continue
+                
+            res = classifier(sent)[0]
+            s_score = res['score']
+            s_label = res['label']
+            s_ai_prob = s_score * 100 if s_label in ['Fake', 'LABEL_0'] else (1 - s_score) * 100
+            
+            s_risk = "Low"
+            if s_ai_prob > 80: s_risk = "High"
+            elif s_ai_prob > 50: s_risk = "Medium"
+            
+            breakdown.append({"text": sent, "risk": s_risk, "prob": round(s_ai_prob, 1)})
+
+        return {
+            "prediction": pred, "confidence": round(conf, 1), "risk_level": risk,
+            "breakdown": breakdown  # <--- NEW DATA
+        }
     except Exception as e:
         return {"error": str(e)}
 
