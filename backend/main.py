@@ -31,10 +31,10 @@ app.add_middleware(
 
 # --- 2. API CONFIGURATION (THE FIX) ---
 # PASTE YOUR HUGGING FACE TOKEN BELOW IN THE QUOTES
-API_TOKEN = "hf_PASTE_YOUR_TOKEN_HERE"  
+API_TOKEN = "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"  
 
 API_URL_DETECTOR = "https://api-inference.huggingface.co/models/roberta-base-openai-detector"
-headers = {"Authorization": f"Bearer {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}"}
+headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
 def query_ai_api(payload):
     """Sends text to Hugging Face to check if it's AI-written."""
