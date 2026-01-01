@@ -5,22 +5,18 @@ import nltk
 from nltk.corpus import wordnet
 from nltk.tokenize import sent_tokenize, word_tokenize
 import random
-import re
-import requests  # <--- NEW: Using this instead of heavy 'transformers'
+import requests
 
 # --- 1. SETUP & DOWNLOADS ---
 print("⏳ CHECKING DICTIONARY DATA...")
 resources = ['wordnet', 'omw-1.4', 'averaged_perceptron_tagger', 'punkt', 'punkt_tab']
-
 for res in resources:
     try:
         nltk.data.find(f'corpora/{res}') if 'wordnet' in res else nltk.data.find(f'tokenizers/{res}')
     except LookupError:
-        print(f"⬇️ Downloading {res}...")
         nltk.download(res)
-         
-app = FastAPI()
 
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,145 +25,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. API CONFIGURATION (THE FIX) ---
-# PASTE YOUR HUGGING FACE TOKEN BELOW IN THE QUOTES
-API_TOKEN = "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"  
-
-API_URL_DETECTOR = "https://api-inference.huggingface.co/models/roberta-base-openai-detector"
+# --- 2. API CONFIGURATION ---
+# ✅ TOKEN (Your Token):
+API_TOKEN = "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"
 headers = {"Authorization": f"Bearer {API_TOKEN}"}
 
-def query_ai_api(payload):
-    """Sends text to Hugging Face to check if it's AI-written."""
+# ✅ TEXT MODEL ONLY (We removed the Code model to be safe):
+API_URL = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
+
+def query_huggingface(payload):
     try:
-        response = requests.post(API_URL_DETECTOR, headers=headers, json=payload)
+        response = requests.post(API_URL, headers=headers, json=payload)
         return response.json()
     except Exception as e:
         return {"error": str(e)}
 
-# --- 3. SMART GRAMMAR MAP (KEPT ORIGINAL) ---
-FUNCTIONAL_SYNONYMS = {
-    "when": ["while", "at the time", "during which"],
-    "as": ["since", "because", "while"],
-    "if": ["provided that", "assuming", "in case"],
-    "but": ["however", "although", "yet"],
-    "and": ["plus", "along with", "as well as"],
-    "because": ["since", "due to the fact", "as"],
-    "so": ["therefore", "thus", "consequently"],
-    "use": ["utilize", "employ", "apply"]
-}
+# --- 3. LOGIC (Paraphraser) ---
+FUNCTIONAL_SYNONYMS = {"when": ["while"], "as": ["since"], "if": ["provided that"], "but": ["however"], "so": ["therefore"]}
 
-# --- 4. DATA MODELS ---
+class TextRequest(BaseModel):
+    content: str
 class ParaphraseRequest(BaseModel):
     content: str
-    tone: str = "Standard" 
-
-class SentenceRequest(BaseModel):
-    sentence: str
-    tone: str
-
+    tone: str = "Standard"
 class WordRequest(BaseModel):
     word: str
 
-class TextRequest(BaseModel):
-    title: str = ""
-    content: str
-
-# --- 5. LOGIC FUNCTIONS (KEPT ORIGINAL NLTK LOGIC) ---
-def get_synonyms(word, pos_tag=None, tone="Standard", strict=True):
-    word_lower = word.lower()
-    if word_lower in FUNCTIONAL_SYNONYMS: 
-        return FUNCTIONAL_SYNONYMS[word_lower]
-
+def get_synonyms(word):
+    if word.lower() in FUNCTIONAL_SYNONYMS: return FUNCTIONAL_SYNONYMS[word.lower()]
     synsets = wordnet.synsets(word)
-    synonyms = set()
-    
-    for syn in synsets[:3]:
-        for lemma in syn.lemmas():
-            candidate = lemma.name().replace("_", " ")
-            if candidate.lower() != word_lower:
-                synonyms.add(candidate)
-            
-    return sorted(list(synonyms), key=len)
+    syns = set()
+    for s in synsets[:3]:
+        for l in s.lemmas():
+            if l.name().lower() != word.lower(): syns.add(l.name().replace("_", " "))
+    return list(syns)
 
-def rewrite_sentence_logic(sentence, tone, variance_level=0.5):
+def rewrite_sentence_logic(sentence, tone):
     words = word_tokenize(sentence)
     new_words = []
     for word in words:
-        if random.random() < 0.4: # Simple logic for brevity
+        if random.random() < 0.4:
             syns = get_synonyms(word)
-            if syns: new_words.append(random.choice(syns))
-            else: new_words.append(word)
+            new_words.append(random.choice(syns) if syns else word)
         else:
             new_words.append(word)
     return " ".join(new_words)
 
-# --- 6. ENDPOINTS ---
+# --- 4. ENDPOINTS ---
 
 @app.post("/analyze")
 async def analyze_text(data: TextRequest):
-    """
-    New lightweight version: Calls the API instead of using local RAM.
-    """
-    if not data.content.strip():
-        return {"prediction": "Error", "confidence": 0}
+    if not data.content.strip(): return {"prediction": "Error", "confidence": 0}
+    
+    # 1. Call API
+    output = query_huggingface({"inputs": data.content})
+    
+    # 2. Check for "Model Loading" or Errors
+    if isinstance(output, dict) and "error" in output:
+        # If model is loading, return a polite message
+        return {"prediction": "Model Waking Up...", "confidence": 0, "risk_level": "Low"}
 
-    # 1. Send text to Hugging Face API
-    api_response = query_ai_api({"inputs": data.content})
-
-    # 2. Parse API Result (It usually returns a list of labels like 'Real' or 'Fake')
-    # Example format: [[{'label': 'Fake', 'score': 0.99}, {'label': 'Real', 'score': 0.01}]]
+    # 3. Parse Result
     try:
-        # Handle cases where API is loading
-        if isinstance(api_response, dict) and "error" in api_response:
-            return {"prediction": "Model Loading...", "confidence": 0, "risk_level": "Low"}
-
-        # Get the highest score
-        scores = api_response[0] 
-        fake_score = next((item['score'] for item in scores if item['label'] in ['Fake', 'LABEL_0']), 0)
-        real_score = next((item['score'] for item in scores if item['label'] in ['Real', 'LABEL_1']), 0)
-
+        # OpenAI Detector returns: [[{'label': 'Fake', 'score': 0.9}, {'label': 'Real', 'score': 0.1}]]
+        scores = output[0] 
+        fake_score = next((x['score'] for x in scores if x['label'] in ['Fake', 'LABEL_0']), 0)
         ai_prob = fake_score * 100
         
-        # 3. Determine Risk
-        risk = "Low"
-        pred = "Human-Written"
-        if ai_prob > 80: 
-            risk = "High"
-            pred = "AI-Generated"
-        elif ai_prob > 50: 
-            risk = "Medium"
-            pred = "Possible AI"
-
-        return {
-            "prediction": pred,
-            "confidence": round(ai_prob if pred == "AI-Generated" else (100 - ai_prob), 1),
-            "risk_level": risk,
-            "breakdown": [] # Feature temporarily disabled to save API limits
-        }
-    except Exception as e:
-        return {"error": "API Error", "details": str(e), "raw": api_response}
+        pred = "AI-Generated" if ai_prob > 80 else "Human-Written"
+        risk = "High" if ai_prob > 80 else "Low"
+        
+        return {"prediction": pred, "confidence": round(ai_prob if pred == "AI-Generated" else 100-ai_prob, 1), "risk_level": risk}
+    except:
+        return {"prediction": "API Error", "confidence": 0, "risk_level": "Low"}
 
 @app.post("/analyze_code")
 async def analyze_code(data: TextRequest):
-    # We disabled the heavy code model to save memory.
-    return {
-        "prediction": "Feature Unavailable (Free Tier)", 
-        "confidence": 0, 
-        "risk_level": "Low"
-    }
+    # 🛑 DISABLED to prevent crashes
+    return {"prediction": "Feature Disabled", "confidence": 0, "risk_level": "Low"}
 
 @app.post("/paraphrase")
-async def paraphrase_text(data: ParaphraseRequest):
-    sentences = sent_tokenize(data.content)
-    # Using your original logic
-    rewritten = [rewrite_sentence_logic(sent, data.tone) for sent in sentences]
-    return {"paraphrased": " ".join(rewritten)}
+async def paraphrase(data: ParaphraseRequest):
+    sents = sent_tokenize(data.content)
+    return {"paraphrased": " ".join([rewrite_sentence_logic(s, data.tone) for s in sents])}
 
 @app.post("/synonyms")
-async def fetch_synonyms(data: WordRequest):
-    syns = get_synonyms(data.word)
-    return {"synonyms": syns[:6]}
+async def synonyms(data: WordRequest):
+    return {"synonyms": get_synonyms(data.word)[:6]}
 
 @app.get("/")
-async def health():
-    return {"status": "Ready"}
+async def health(): return {"status": "Ready"}
