@@ -1,10 +1,8 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-transformers
 fastapi
 uvicorn
+python-multipart
+requests
 numpy
 scikit-learn
 nltk
-python-multipart
 supabase
