@@ -6,3 +6,4 @@ numpy
 scikit-learn
 nltk
 supabase
+duckduckgo-search 
