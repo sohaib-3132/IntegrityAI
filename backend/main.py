@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # --- 2. CONFIGURATION ---
-API_TOKEN = "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" # Keep your token
+API_TOKEN = "PASTE YOUR TOKEN HERE" # Keep your token
 headers = {"Authorization": f"Bearer {API_TOKEN}"}
 API_URL = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
 
